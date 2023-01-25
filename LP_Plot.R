@@ -78,8 +78,10 @@ if (!all(plotvars %in% colnames(df))) {
 #                                 .names = "{.col}_{.fn}")))
 ## Plot
 # saving for reference: https://community.rstudio.com/t/using-stat-instead-of-dplyr-to-summarize-groups-in-a-ggplot/13916/2
-ggplot(data = df, mapping = aes(x = Day, y = Body_mass_g, color = treatment, group = treatment)) + 
-  geom_point(alpha=0.5, size = 1) + 
+ggplot(data = df, mapping = aes(x = Day, y = Body_mass_g, color = treatment, group = treatment, fill = treatment)) + 
+  #geom_point(alpha=0.5, size = 1) + 
   geom_line(aes(group = sbj), alpha = 0.25, size = 1) +
   facet_grid(~ sex) + 
-  stat_summary(fun = "mean",geom = "line", linewidth = 2) 
+  stat_summary(fun = "mean",geom = "line", size = 1.5) +
+  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = 0.5, linetype = 0)
+
