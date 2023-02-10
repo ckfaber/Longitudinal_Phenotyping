@@ -37,8 +37,9 @@ plt      <- 'Dark2' # default; palette for scale_brewer functions
 plotvars <- c("Body_mass_g","Body_mass_pct","FI_g","FI_kcal","FI_g_cum","FI_kcal_cum", "Blood_glucose_mgdl")
 NCDgcal  <- 3.35 #default conversion 
 HFDgcal  <- 5.47 # default conversion
+export   <- F
 ftype    <- "pdf" # default file type for exporting plots
-#fpath    <- "" # path to folder where plots should be saved
+fpath    <- "C:/Users/cfaber/Dropbox (Barrow Neurological Institute)/Mirzadeh Lab Dropbox MAIN/CLF/Projects/dtx/Tt01/Longitudinal_Phenotyping" # path to folder where plots should be saved
 
 ## Load spreadsheet -----------------------------------------------------------
 
@@ -58,7 +59,6 @@ df       <- left_join(df, key, by = "Subject")
 # Clean up date-time, factorize variables
 df <- df %>%
   mutate(Date = ymd(df$Date)) %>%
-  mutate(Time = format(as.POSIXct(df$Time), format = "%H:%M")) %>% 
   mutate(across(c(Subject,Sex,Treatment,Diet), as.factor))
 
 # Check whether food refill column meets requirements for automatic FI calculation
@@ -93,31 +93,24 @@ if (!exists("day0")) {
     mutate(Day = as.integer(ceiling(difftime(Date, as.POSIXct(day0), units = "days"))), .before = Subject) %>% 
     group_by(Subject) %>% 
     mutate(Int = Day - lag(Day)) %>% # interval between days
-    mutate(Period = as.factor(case_when(
-      Day < 0 ~ 0,
-      Day >= 0 ~ 1))) %>% 
     mutate(Food_refill_weight_g = lag(Food_refill_weight_g), # lag the refill column so it it's in same row as value to be subtracted
            FI_g = -(Food_weight_g - lag(Food_weight_g)) / Int,
            FI_g = ifelse(!is.na(Food_refill_weight_g), Food_refill_weight_g - Food_weight_g, FI_g)) %>%
     ungroup()
   
   # Extract pre-day0 into separate df, fill cumulative FI with NA
-  pre      <- df %>% 
-    filter(Day < 0) %>% 
+  baseline <- df %>% 
+    filter(Day < -1) %>% 
     mutate(FI_g_cum = NA) %>%
     ungroup()
   
   # Extract post-day0 into separate df, cumulative FI calculations
-  post     <- df %>% 
-    filter(Day >= 0) %>%
+  df <- df %>% 
+    filter(Day >= -1) %>%
     group_by(Subject) %>%
     mutate(FI_g_cum = cumsum(FI_g)) %>%
     ungroup()
-  
-  # Combine pre- and post-dfs
-  df <- bind_rows(pre,post)
-  rm(list = c("pre","post"))
-  
+
 }
 
 # Compute FI in kcal, % initial body weight
@@ -128,12 +121,111 @@ df <- df %>%
   mutate(Body_mass_pct = Body_mass_g / Body_mass_g[Day == 0] * 100) %>%
   ungroup()
 
-## Quality control --------------------------------------------------------
+## Time-Series Plots ---------------------------------------------------------
+
+# Create df with y-axis labels for plotvars
+plotlabs <- tibble(plotvar = plotvars, 
+                   label = c("Body Mass (g)", 
+                             "Body Mass (% Initial)", 
+                             "Food Intake (g)",
+                             "Food Intake (kcal)",
+                             "Cumulative Food Intake (g)",
+                             "Cumulative Food Intake (kcal)",
+                             "Blood Glucose (mg/dL)"))
+
+
 # Check that all of plotvars is in column space of df, modify if not
 if (!all(plotvars %in% colnames(df))) {
   idx = plotvars %in% colnames(df)
   plotvars <- plotvars[idx]
   rm(idx)
+}
+
+# Create ggplot function for time-series plots
+LP_tsplot <- function(var) {
+  
+  ylab <- filter(plotlabs,plotvar == {{var}}) %>% pull()
+  p    <- ggplot(df, mapping = aes(x = Day, 
+                           y = .data[[var]], 
+                           color = .data[[groupvar]], 
+                           group = .data[[groupvar]], 
+                           fill = .data[[groupvar]])) + 
+    #geom_point(alpha=0.5, size = 1) + 
+    geom_line(aes(group = Subject), alpha = 0.5, linetype = 5,linewidth = 1) +
+    facet_grid(~ .data[[facetvar]]) +
+    stat_summary(fun = "mean",geom = "line", linewidth = 1.5) +
+    stat_summary(fun.data = mean_se, geom = "ribbon", alpha = 0.5, linetype = 0) +
+    scale_color_brewer(palette = plt) +
+    scale_fill_brewer(palette = plt) +
+    theme_classic() + 
+    labs(y = ylab)
+  
+  if (grepl("cum",var)) {
+    p <- p + xlim(0, NA)
+  } else {
+    p <- p + xlim(-1, NA)
+  }
+  return(p)
+}
+
+# Loop through plotvars
+ts.plots     <- vector(mode = "list", length = length(plotvars)) # initialize empty list
+for (i in 1:length(plotvars)) {
+  
+  var <- plotvars[[i]]
+  ts.plots[[i]] <- LP_tsplot(var)
+  names(ts.plots)[i] <- var
+  print(ts.plots[[i]]) 
+  
+  if (export & exists("fpath")) {
+    ggsave(paste(var,ftype,sep='.'), width=5,height=3,units="in",path = fpath)
+  }
+}
+
+## Box plots - Pre- and Post-Intervention --------------------------------------
+
+# Grab first and last values of plotvars in df for paired box plots
+df_summary <- df %>% 
+  group_by(Subject) %>% 
+  summarize(across(all_of(plotvars), list(Pre = first, Post = last))) %>%
+  select(!contains("cum"))%>% # don't need the cumulative ones
+  pivot_longer(!Subject, 
+               names_to = c("Measure","Period"), 
+               names_pattern = "(.*)_(.*)") %>%
+  left_join(key, by = "Subject") %>%
+  mutate(Period = factor(Period,levels = c("Pre","Post"),ordered = TRUE))
+
+bpvars <- plotvars[!str_detect(plotvars,"cum")]
+
+for (i in 1:length(bpvars)) {
+  var <- bpvars[[i]]
+  ylab <- filter(plotlabs,plotvar == {{var}}) %>% pull()
+  
+  p <- ggplot(data = df_summary %>% filter(Measure == {{var}}), aes(x = Period, y = value)) +
+    facet_grid(~.data[[facetvar]]) +
+    geom_boxplot(aes(fill = .data[[groupvar]]), alpha = 0.5) + 
+    geom_point(aes(color = .data[[groupvar]], 
+                   fill = .data[[groupvar]],
+                   group = .data[[groupvar]]),
+               color = "black", 
+               position = position_dodge(width = 0.75),shape = 21, show.legend = FALSE) + 
+    scale_color_brewer(palette = plt) +
+    scale_fill_brewer(palette = plt) +
+    ylab(ylab) + 
+    theme_classic()
+  print(p)
+  
+}
+            
+## Quality control & summary statistics ----------------------------------------
+
+sum_stats <- vector(mode = "list", length = length(plotvars))
+for (i in 1:length(plotvars)) {
+  var <- plotvars[i]
+  sum_stats[[i]] <- df %>% 
+    group_by(Day,.data[[facetvar]],.data[[groupvar]]) %>% 
+    get_summary_stats(.data[[var]])
+  names(sum_stats)[i] <- var
 }
 
 # Confirm initial body weights/FI are normally distributed and not significantly different between groups
@@ -176,76 +268,3 @@ BM_init_boxplot <- ggplot(BM_init, aes(x = .data[[groupvar]],y = .data[[plotvar]
   labs(x = "Treatment", y = "Initial Body Mass (g)", fill = "Treatment") + 
   theme_classic()
 BM_init_boxplot
-
-## Time-Series Plots ---------------------------------------------------------
-
-# Create df with y-axis labels for plotvars
-plotlabs <- tibble(plotvar = plotvars, 
-                   label = c("Body Mass (g)", 
-                             "Body Mass (% Initial)", 
-                             "Food Intake (g)",
-                             "Food Intake (kcal)",
-                             "Cumulative Food Intake (g)",
-                             "Cumulative Food Intake (kcal)"))
-
-
-# Create ggplot function for time-series plots
-LP_tsplot <- function(var) {
-  
-  ylab <- filter(plotlabs,plotvar == {{var}}) %>% pull()
-  p    <- ggplot(df, mapping = aes(x = Day, 
-                           y = .data[[var]], 
-                           color = .data[[groupvar]], 
-                           group = .data[[groupvar]], 
-                           fill = .data[[groupvar]])) + 
-    #geom_point(alpha=0.5, size = 1) + 
-    geom_line(aes(group = Subject), alpha = 0.5, linetype = 5,linewidth = 1) +
-    facet_grid(~ .data[[facetvar]]) +
-    stat_summary(fun = "mean",geom = "line", linewidth = 1.5) +
-    stat_summary(fun.data = mean_se, geom = "ribbon", alpha = 0.5, linetype = 0) +
-    scale_color_brewer(palette = plt) +
-    scale_fill_brewer(palette = plt) +
-    theme_classic() + 
-    labs(y = ylab)
-  
-  if (grepl("cum",var)) {
-    p <- p + xlim(0, NA)
-  } else {
-    p <- p + xlim(-1, NA)
-  }
-  return(p)
-}
-
-# Loop through plotvars
-ts.plots     <- vector(mode = "list", length = length(plotvars)) # initialize empty list
-
-for (i in 1:length(plotvars)) {
-  
-  var <- plotvars[[i]]
-  ts.plots[[i]] <- LP_tsplot(var)
-  names(ts.plots)[i] <- var
-  print(ts.plots[[i]]) 
-  
-  if (exists("fpath")) {
-    ggsave(paste(var,ftype,sep='.'), path = fpath)
-  }
-}
-
-# saving for reference: https://community.rstudio.com/t/using-stat-instead-of-dplyr-to-summarize-groups-in-a-ggplot/13916/2
-# ggplot(data = df, mapping = aes(x = Day, 
-#                                 y = Body_mass_g, 
-#                                 color = Treatment, 
-#                                 group = Treatment, 
-#                                 fill = Treatment)) + 
-#   #geom_point(alpha=0.5, size = 1) + 
-#   geom_line(aes(group = Subject), alpha = 0.5, linetype = 5,linewidth = 1) +
-#   facet_grid(~ Sex) +
-#   stat_summary(fun = "mean",geom = "line", size = 1.5) +
-#   stat_summary(fun.data = mean_se, geom = "ribbon", alpha = 0.5, linetype = 0) +
-#   scale_color_brewer(palette = "Dark2") +
-#   scale_fill_brewer(palette = "Dark2") +
-#   theme_classic() + 
-#   labs(y = "Body Mass (g)")
-
-## Box plots - before and after -----------------------------------------------
-
